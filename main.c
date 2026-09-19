@@ -36,6 +36,7 @@
 #include "led.h"
 #include "tmr.h"
 #include "nvic_table.h"
+#include "tft.h"
 /***** Definitions *****/
 
 //#define POLLING // Uncomment to perform ADC conversions using blocking/polling method
@@ -470,9 +471,9 @@ static void fft_find_peak(void)
                     ADC_FS_HZ /
                     FFT_SIZE) + 0.5f);
 
-    printf("peak bin=%lu, frequency=%lu Hz\n",
-           (unsigned long)peak_bin,
-           (unsigned long)frequency_hz);
+    // printf("peak bin=%lu, frequency=%lu Hz\n",
+    //        (unsigned long)peak_bin,
+    //        (unsigned long)frequency_hz);
 }
 /*********** fft end ***********/
 
@@ -528,7 +529,13 @@ void ShowAdcResult(void)
 
 
 
- extern int MXC_ADC_StartConversionDMA2(mxc_adc_conversion_req_t *req, int *data, int size, void (*callback)(int, int));
+extern int MXC_ADC_StartConversionDMA2(mxc_adc_conversion_req_t *req, int *data, int size, void (*callback)(int, int));
+
+// 降低绘制时间
+#define DISPLAY_EVERY_N_FFT   10
+static uint32_t display_counter = 0;
+
+
 int main(void)
 {
     int ret;
@@ -568,6 +575,10 @@ int main(void)
     SystemCoreClockUpdate();
     printf("HCLK = %lu Hz\n",  (unsigned long)SystemCoreClock);
 
+    // tft and spectrum init
+    Spectrum_Init();
+
+
     while (1) {
         LED_On(0);
        // MXC_TMR_Delay(MXC_TMR0, MSEC(10));
@@ -584,10 +595,19 @@ int main(void)
         // DMA completed
         // ShowAdcResult();
         if(prepare_adc_data()){
+            // 计算fft
             fft_prepare_input(fft_adc);
             arm_rfft_fast_f32(&fft_instance, fft_input, fft_output, 0);
             fft_calculate_magnitude();
-            fft_find_peak();
+            
+            
+            // 绘制速率降低
+            display_counter++;
+            if (display_counter >= DISPLAY_EVERY_N_FFT) {
+                display_counter = 0;
+                fft_find_peak();
+                Spectrum_Draw(fft_magnitude);
+            }
 
         }else{
             printf("prepare adc none.\n");

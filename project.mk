@@ -30,7 +30,10 @@
 # For more information on how sing process works, see
 # https://www.analog.com/en/education/education-library/videos/6313214207112.html
 SBT=0
-
+IPATH += TFT
+VPATH += TFT
+SRCS += tft.c
+FONTS = LiberationSans12x12 LiberationSans24x24 LiberationSans28x28 LiberationSans16x16
 
 # Include the CMSIS-DSP library
 LIB_CMSIS_DSP = 1
