@@ -291,6 +291,8 @@ static volatile unsigned int dma_done;
 static volatile int dma_error;
 mxc_adc_conversion_req_t adc_conv;
 
+/*********** dma ***********/
+
 void adc_dma_callback(int ch, int err)
 {
     adc_index = (err == E_NO_ERROR) ? ADC_BLOCK_SIZE : 0;
@@ -360,7 +362,119 @@ void adc_example1_configuration(void)
 
     MXC_ADC_SlotConfiguration(&single_slot, 1);
 }
+/*********** dma end ***********/
 
+/*********** fft start ***********/
+#include <math.h>
+#include <arm_math.h>
+
+#define FFT_SIZE       ADC_BLOCK_SIZE
+#define ADC_FS_HZ      180000.0f
+#define PI_F           3.14159265358979323846f
+
+static arm_rfft_fast_instance_f32 fft_instance;
+static int fft_adc[FFT_SIZE]; // adc(处理无效值后的)原始数据
+static float32_t fft_input[FFT_SIZE]; 
+static float32_t fft_output[FFT_SIZE];
+static float32_t fft_magnitude[FFT_SIZE / 2 + 1];
+static float32_t hann_window[FFT_SIZE];
+int fft_init(void)
+{
+    arm_status status;
+
+    status = arm_rfft_fast_init_f32(&fft_instance, FFT_SIZE);
+
+    if (status != ARM_MATH_SUCCESS) {
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < FFT_SIZE; i++) {
+        hann_window[i] =
+            0.5f -
+            0.5f * cosf((2.0f * PI_F * i) /
+                        (FFT_SIZE - 1));
+    }
+
+    return 0;
+}
+// 预处理数据，返回值1代表有数据
+static uint8_t prepare_adc_data(){
+    int cnt=0;
+    uint32_t raw;
+    uint8_t invalid;
+    for (int i=0; i < adc_index; i++) {
+        if (adc_conv.fifo_format == MXC_ADC_DATA) {
+            raw = (uint32_t)adc_val[i];
+            invalid = (raw >> 24) & 0x01;
+            if(invalid==0){
+                fft_adc[cnt++] = raw & 0xFFFF;
+                //printf("%d,%06d\n", cnt, data);
+                continue;
+            }
+        }
+        fft_adc[cnt++] = 0; // 如果值无效，置0
+    }
+    return cnt>0?1:0;
+}
+static void fft_prepare_input(const int *adc_data)
+{
+    float32_t mean = 0.0f;
+
+    /* 1. 计算256点平均值 */
+    for (uint32_t i = 0; i < FFT_SIZE; i++) {
+        uint32_t sample = ((uint32_t)adc_data[i]) & 0x0FFF;
+        mean += (float32_t)sample;
+    }
+
+    mean /= (float32_t)FFT_SIZE;
+
+    /* 2. 去直流并乘Hann窗 */
+    for (uint32_t i = 0; i < FFT_SIZE; i++) {
+        uint32_t sample = ((uint32_t)adc_data[i]) & 0x0FFF;
+
+        fft_input[i] =
+            ((float32_t)sample - mean) *
+            hann_window[i];
+    }
+}
+static void fft_calculate_magnitude(void)
+{
+    fft_magnitude[0] = fabsf(fft_output[0]);
+
+    for (uint32_t k = 1; k < FFT_SIZE / 2; k++) {
+        float32_t real = fft_output[2 * k];
+        float32_t imag = fft_output[2 * k + 1];
+
+        fft_magnitude[k] =
+            sqrtf(real * real + imag * imag);
+    }
+
+    /* Nyquist频点是特殊的纯实数 */
+    fft_magnitude[FFT_SIZE / 2] =
+        fabsf(fft_output[1]);
+}
+static void fft_find_peak(void)
+{
+    uint32_t peak_bin = 1;
+    float32_t peak_value = fft_magnitude[1];
+
+    for (uint32_t k = 2; k < FFT_SIZE / 2; k++) {
+        if (fft_magnitude[k] > peak_value) {
+            peak_value = fft_magnitude[k];
+            peak_bin = k;
+        }
+    }
+
+    uint32_t frequency_hz =
+        (uint32_t)(((float32_t)peak_bin *
+                    ADC_FS_HZ /
+                    FFT_SIZE) + 0.5f);
+
+    printf("peak bin=%lu, frequency=%lu Hz\n",
+           (unsigned long)peak_bin,
+           (unsigned long)frequency_hz);
+}
+/*********** fft end ***********/
 
 void ShowAdcResult(void)
 {
@@ -417,6 +531,8 @@ void ShowAdcResult(void)
  extern int MXC_ADC_StartConversionDMA2(mxc_adc_conversion_req_t *req, int *data, int size, void (*callback)(int, int));
 int main(void)
 {
+    int ret;
+
     printf("********** ADC Example **********\n");
     printf("\nThe voltage applied to analog pin continuously\n");
     printf("measured and the result is printed to the terminal.\n");
@@ -425,65 +541,64 @@ int main(void)
 
     /* ADC Initialization */
     adc_init();
-
     /* Start with Single Channel Example */
     adc_example1_configuration();
-
- 
     //NVIC_EnableIRQ(ADC_IRQn);
- 
+
+    // dma init
+    MXC_DMA_Init();
+    // printf("Acquire DMA...\n");
+    int dma_channel = MXC_DMA_AcquireChannel();
+    // printf("DMA channel = %d\n", dma_channel);
+    if (dma_channel < 0) {
+        printf("Acquire DMA failed: %d\n", dma_channel);
+        goto MAINEND;
+    }
+    adc_conv.dma_channel = dma_channel;
+    MXC_NVIC_SetVector(MXC_DMA_CH_GET_IRQ(dma_channel), DMA_IRQHandler);
+    NVIC_EnableIRQ(MXC_DMA_CH_GET_IRQ(dma_channel));
+
+    // fft init
+    if (fft_init() != 0) {
+        printf("FFT init failed\n");
+        goto MAINEND;
+    }
+
     // 查看当前频率  120MHz
     SystemCoreClockUpdate();
     printf("HCLK = %lu Hz\n",  (unsigned long)SystemCoreClock);
 
-
-int ret;
-
-    MXC_DMA_Init();
-    
-
-    printf("Acquire DMA...\n");
-
-    int dma_channel = MXC_DMA_AcquireChannel();
-    printf("DMA channel = %d\n", dma_channel);
-
-    if (dma_channel < 0) {
-        printf("Acquire DMA failed: %d\n", dma_channel);
-        while (1) {}
-    }
-
-    adc_conv.dma_channel = dma_channel;
-
-    MXC_NVIC_SetVector(MXC_DMA_CH_GET_IRQ(dma_channel), DMA_IRQHandler);
-    NVIC_EnableIRQ(MXC_DMA_CH_GET_IRQ(dma_channel));
-
     while (1) {
-        /* Flash LED when starting ADC cycle */
         LED_On(0);
        // MXC_TMR_Delay(MXC_TMR0, MSEC(10));
-       
-
-
         dma_done = 0;
-    //  Start ADC DMA
-    ret = MXC_ADC_StartConversionDMA2(&adc_conv,
-                                     &adc_val[0],
-                                     ADC_BLOCK_SIZE,
-                                     adc_dma_callback);
+        //  Start ADC DMA
+        ret = MXC_ADC_StartConversionDMA2(&adc_conv, &adc_val[0], ADC_BLOCK_SIZE, adc_dma_callback);
+        if (ret != E_NO_ERROR) {
+            printf("Start ADC DMA failed\n");
+            while (1) {}
+        }
 
-    if (ret != E_NO_ERROR) {
-        printf("Start ADC DMA failed\n");
-        while (1) {}
-    }
+        while (!dma_done) {}
 
-    while (!dma_done) {}
+        // DMA completed
+        // ShowAdcResult();
+        if(prepare_adc_data()){
+            fft_prepare_input(fft_adc);
+            arm_rfft_fast_f32(&fft_instance, fft_input, fft_output, 0);
+            fft_calculate_magnitude();
+            fft_find_peak();
 
-    // DMA completed
-    ShowAdcResult();
+        }else{
+            printf("prepare adc none.\n");
+        }
 
     }
 
     MXC_DMA_ReleaseChannel(adc_conv.dma_channel);
+
+MAINEND:
+    while(1){}
 }
 
 //End

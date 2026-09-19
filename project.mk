@@ -31,6 +31,10 @@
 # https://www.analog.com/en/education/education-library/videos/6313214207112.html
 SBT=0
 
+
+# Include the CMSIS-DSP library
+LIB_CMSIS_DSP = 1
+
 METHOD ?= POLLING
 PROJ_CFLAGS += -D$(METHOD)
 # Add compiler flags to enable source navigation in ELF File Explorer
