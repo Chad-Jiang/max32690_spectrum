@@ -59,10 +59,8 @@
 #ifdef INTERRUPT
 volatile unsigned int adc_done = 0;
 #endif
-#define DMA
-#ifdef DMA
-volatile unsigned int dma_done = 0;
-#endif
+
+
 
 #ifdef REF_TRIM
 //These values are dependent on the sample rate of the ADC. For 250ksps, the
@@ -90,10 +88,7 @@ mxc_adc_slot_req_t multi_slots[8] = { { MXC_ADC_CH_0 }, { MXC_ADC_CH_1 }, { MXC_
                                       { MXC_ADC_CH_3 }, { MXC_ADC_CH_4 }, { MXC_ADC_CH_5 },
                                       { MXC_ADC_CH_6 }, { MXC_ADC_CH_7 } };
 
-int adc_val[8];
-uint32_t adc_index = 0;
 
-mxc_adc_conversion_req_t adc_conv;
 
 /***** Functions *****/
 
@@ -288,14 +283,21 @@ void adc_external_ref_trim(void)
 #endif
 
 // USER CODE 
+#define ADC_BLOCK_SIZE 256
 
+uint32_t adc_index = 0;
+static int adc_val[ADC_BLOCK_SIZE];
+static volatile unsigned int dma_done;
+static volatile int dma_error;
+mxc_adc_conversion_req_t adc_conv;
 
 void adc_dma_callback(int ch, int err)
 {
-    adc_index = adc_conv.num_slots;
-
+    adc_index = (err == E_NO_ERROR) ? ADC_BLOCK_SIZE : 0;
+ LED_Off(0);
     MXC_ADC_DisableConversion();
 
+    
     dma_done = 1;
 }
 
@@ -341,7 +343,7 @@ void adc_init(void)
 /* Single channel */
 void adc_example1_configuration(void)
 {
-    adc_conv.mode = MXC_ADC_ATOMIC_CONV; //MXC_ADC_CONTINUOUS_CONV;
+    adc_conv.mode = MXC_ADC_CONTINUOUS_CONV; //MXC_ADC_CONTINUOUS_CONV;
     adc_conv.trig = MXC_ADC_TRIG_SOFTWARE;
     //adc_conv.trig = MXC_ADC_TRIG_HARDWARE;
     //adc_conv.hwTrig = MXC_ADC_TRIG_SEL_TEMP_SENS;
@@ -352,7 +354,7 @@ void adc_example1_configuration(void)
     adc_conv.fifo_threshold = 0;
 
     adc_conv.lpmode_divder = MXC_ADC_DIV_2_5K_50K_ENABLE;
-    adc_conv.num_slots = 1;
+    adc_conv.num_slots = 1; // 这里表示每次只有一个通道，不代表只采一个时间点
 
     MXC_ADC_Configuration(&adc_conv);
 
@@ -360,14 +362,19 @@ void adc_example1_configuration(void)
 }
 
 
-
 void ShowAdcResult(void)
 {
     unsigned int loop_count;
+    uint32_t raw;
+    uint32_t data;
+    uint32_t channel;
+    uint32_t invalid;
+    uint32_t clipped;
+    uint32_t cnt=0;
 
 
     // Stop the ADC
-    MXC_ADC_DisableConversion();
+    // MXC_ADC_DisableConversion();
 
     if (adc_conv.fifo_format == MXC_ADC_DATA_STATUS) {
         //printf("CH : Data\n");
@@ -379,18 +386,35 @@ void ShowAdcResult(void)
             printf("%02X : %03X\n", (adc_val[loop_count] >> 16), (adc_val[loop_count] & 0x0FFF));
         } else {
             // printf("%03X \n", adc_val[loop_count]);
-            uint32_t raw = adc_val[loop_count];
-            printf("raw=%08lX, adc=%03lX\n",
-                (unsigned long)raw,
-                (unsigned long)(raw & 0x0FFF));
+            raw = (uint32_t)adc_val[loop_count];
+            data = raw & 0xFFFF;
+            channel = (raw >> 16) & 0x1F;
+            invalid = (raw >> 24) & 0x01;
+            clipped = (raw >> 31) & 0x01;
+            // printf("raw=%08lX ch=%lu data=%03lX invalid=%lu clipped=%lu\n",
+            //    (unsigned long)raw,
+            //    (unsigned long)channel,
+            //    (unsigned long)(data & 0x0FFF),
+            //    (unsigned long)invalid,
+            //    (unsigned long)clipped);
+            if(invalid==0){
+                cnt++;
+                printf("%d,%06d\n", cnt, data);
+            }
+
+    
         }
     }
 
     adc_index = 0;
 
 }
- 
- 
+
+
+
+
+
+ extern int MXC_ADC_StartConversionDMA2(mxc_adc_conversion_req_t *req, int *data, int size, void (*callback)(int, int));
 int main(void)
 {
     printf("********** ADC Example **********\n");
@@ -408,6 +432,9 @@ int main(void)
  
     //NVIC_EnableIRQ(ADC_IRQn);
  
+    // 查看当前频率  120MHz
+    SystemCoreClockUpdate();
+    printf("HCLK = %lu Hz\n",  (unsigned long)SystemCoreClock);
 
 
 int ret;
@@ -430,18 +457,18 @@ int ret;
     MXC_NVIC_SetVector(MXC_DMA_CH_GET_IRQ(dma_channel), DMA_IRQHandler);
     NVIC_EnableIRQ(MXC_DMA_CH_GET_IRQ(dma_channel));
 
-
     while (1) {
         /* Flash LED when starting ADC cycle */
         LED_On(0);
-        MXC_TMR_Delay(MXC_TMR0, MSEC(10));
-        LED_Off(0);
+       // MXC_TMR_Delay(MXC_TMR0, MSEC(10));
+       
 
 
         dma_done = 0;
     //  Start ADC DMA
-    ret = MXC_ADC_StartConversionDMA(&adc_conv,
+    ret = MXC_ADC_StartConversionDMA2(&adc_conv,
                                      &adc_val[0],
+                                     ADC_BLOCK_SIZE,
                                      adc_dma_callback);
 
     if (ret != E_NO_ERROR) {
